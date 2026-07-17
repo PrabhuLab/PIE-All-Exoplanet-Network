@@ -526,3 +526,152 @@ ggsave(paste0("6D_Z_Main_", threshold_value, ".png"), plot = final_plot, width =
 ``` {r Placeholder}
 I looove science
 ```
+
+## Network Metrics
+```{r Network Metrics}
+cat("\n==================================================\n")
+cat("            1. GLOBAL NETWORK METRICS              \n")
+cat("==================================================\n")
+
+# Network Density: What percentage of all possible connections actually exist?
+net_density <- igraph::edge_density(undirected_net)
+cat("Global Network Density:", round(net_density, 5), "\n")
+
+# Global Clustering Coefficient: Do similar exoplanets form tight, interconnected triads?
+net_transitivity <- igraph::transitivity(undirected_net, type = "global")
+cat("Global Clustering Coefficient (Transitivity):", round(net_transitivity, 4), "\n")
+
+
+cat("\n==================================================\n")
+cat("            2. NETWORK TOPOLOGY & SHAPE            \n")
+cat("==================================================\n")
+
+# Average Path Length: On average, how many similarity steps separate any two random planets?
+avg_path_length <- igraph::mean_distance(undirected_net, directed = FALSE)
+cat("Average Path Length (Degrees of Separation):", round(avg_path_length, 2), "steps\n")
+
+# Network Diameter: What is the longest shortest-path across the entire exoplanet catalog?
+net_diameter <- igraph::diameter(undirected_net, directed = FALSE)
+cat("Network Diameter (Maximum Distance across Graph):", net_diameter, "steps\n")
+
+
+cat("\n==================================================\n")
+cat("            3. LOCAL NODE-LEVEL METRICS            \n")
+cat("==================================================\n")
+
+# A. Degree Centrality (Local Hubs: Planets with the highest volume of close neighbors)
+local_degrees <- igraph::degree(undirected_net)
+top_hubs <- head(sort(local_degrees, decreasing = TRUE), 5)
+
+hubs_df <- data.frame(
+  Planet_Hubs = names(top_hubs),
+  Direct_Connections = as.vector(top_hubs)
+)
+cat("Top 5 Local Core Hubs (High Degree Centrality):\n")
+print(as.data.frame(hubs_df))
+cat("\n")
+
+# B. Betweenness Centrality (Local Bridges: Planets that connect separate evolutionary regimes)
+local_betweenness <- igraph::betweenness(undirected_net, directed = FALSE)
+top_bridges <- head(sort(local_betweenness, decreasing = TRUE), 5)
+
+bridges_df <- data.frame(
+  Planet_Bridges = names(top_bridges),
+  Bridge_Score = round(as.vector(top_bridges), 2),
+  Connections = as.vector(igraph::degree(undirected_net)[names(top_bridges)])
+)
+cat("Top 5 Exoplanet Bridges (High Betweenness Centrality):\n")
+print(as.data.frame(bridges_df))
+
+# Filter the main dataset to pull the exact physical profiles of your 5 bridges
+# Note: Fixed the trailing comma after pl_insol to prevent syntax crashes!
+bridge_physical_profiles <- NEA_clustered %>%
+  dplyr::filter(pl_name %in% names(top_bridges)) %>%
+  dplyr::select(
+    pl_name,
+    pl_radj,       # Radius (Jupiter radii)
+    pl_bmassj,     # Mass (Jupiter mass)
+    pl_dens,       # Density
+    pl_orbper,     # Orbital Period (Days)
+    pl_orbeccen,   # Eccentricity
+    pl_insol       # Insolation Flux
+  )
+
+cat("\n==================================================\n")
+cat("      PHYSICAL TRAITS OF THE TOP 5 BRIDGES          \n")
+cat("==================================================\n")
+print(as.data.frame(bridge_physical_profiles))
+
+
+# A. Degree Assortativity
+net_assortativity <- igraph::assortativity_degree(undirected_net)
+cat("Degree Assortativity Coefficient:", round(net_assortativity, 4), "\n")
+if(net_assortativity > 0) {
+  cat("  -> Positive: Hubs tend to connect to other Hubs (Rich-Club effect).\n\n")
+} else {
+  cat("  -> Negative: Hubs tend to connect to lower-degree fringe nodes.\n\n")
+}
+
+# B. Closeness Centrality (Top 5 "Baseline" Planets)
+local_closeness <- igraph::closeness(undirected_net, normalized = TRUE)
+top_closeness <- head(sort(local_closeness, decreasing = TRUE), 5)
+
+closeness_df <- data.frame(
+  Planet = names(top_closeness),
+  Closeness_Score = round(as.vector(top_closeness), 4)
+)
+cat("Top 5 Highest Closeness Centrality (Most accessible from anywhere in the network):\n")
+print(as.data.frame(closeness_df))
+cat("\n")
+
+# C. Eigenvector Centrality (Top 5 "Most Influential" Planets)
+local_eigen <- igraph::eigen_centrality(undirected_net)$vector
+top_eigen <- head(sort(local_eigen, decreasing = TRUE), 5)
+
+eigen_df <- data.frame(
+  Planet = names(top_eigen),
+  Eigen_Score = round(as.vector(top_eigen), 4)
+)
+cat("Top 5 Highest Eigenvector Centrality (Connected to the most important Hubs):\n")
+print(as.data.frame(eigen_df))
+
+# ==========================================
+# 12. ADVANCED TOPOLOGY: STRUCTURAL BOTTLENECKS
+# ==========================================
+
+cat("\n==================================================\n")
+cat("      5. STRUCTURAL BOTTLENECKS & TIE STRENGTH     \n")
+cat("==================================================\n")
+
+# A. Articulation Points (Single Points of Failure)
+# Identifies individual planets that, if removed, would snap the network into disconnected pieces.
+art_points_idx <- igraph::articulation_points(undirected_net)
+art_planets <- V(undirected_net)$name[art_points_idx]
+
+cat("Articulation Points (Critical Evolutionary Bottlenecks):\n")
+if(length(art_planets) > 0) {
+  print(art_planets)
+} else {
+  cat("None found! Your network density is so high that there is no single point of failure.\n")
+}
+
+cat("\n")
+
+# B. Edge Betweenness (Top 5 Most Critical Similarity Ties)
+# Identifies the specific *connections* (not just planets) that bridge the largest structural gaps.
+eb_scores <- igraph::edge_betweenness(undirected_net, directed = FALSE)
+top_eb_idx <- order(eb_scores, decreasing = TRUE)[1:5]
+top_edges <- igraph::E(undirected_net)[top_eb_idx]
+
+# Extract the exact planet pairs holding these critical edges together
+edge_list <- igraph::ends(undirected_net, top_edges)
+
+eb_df <- data.frame(
+  Planet_A = edge_list[, 1],
+  Planet_B = edge_list[, 2],
+  Edge_Betweenness_Score = round(eb_scores[top_eb_idx], 2)
+)
+
+cat("Top 5 Most Critical Similarity Ties (Edge Betweenness):\n")
+print(as.data.frame(eb_df))
+```
