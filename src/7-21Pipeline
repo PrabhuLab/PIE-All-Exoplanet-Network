@@ -1,0 +1,535 @@
+# This is before doing my Monte Carlo simulation. This was built by filtering data, then logging everything but Eccentricity, then min-max into using a 0.97 threshold for Cosine Similarity
+
+
+
+---
+title: "MoFINAL"
+author: "Mo"
+date: "2026-06-04"
+output:
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+#Introduction
+##Loading My Dataset
+##In this section below, I'm importing data from the NASA Exoplanetary Archive. Each datapoint in the archive represents a confirmed exoplanet with measured features.
+```{r load, message=FALSE, warning=FALSE}
+# Packages list
+# NOTE: "installr" removed - it's a Windows-only utility for updating R itself,
+# it isn't used anywhere in this analysis, and it makes the install-check below
+# noticeably slower to no benefit.
+packages <- c("readxl", "psych", "igraph", "network",
+              "ggnetwork", "visNetwork", "intergraph", "lsa",
+              "data.table", "dplyr", "ggplot2", "ggfortify", "ggraph",
+              "dbscan", "Rtsne", "uwot", "tidyr", "Matrix")
+
+# Install missing packages and load them all
+# installed.packages() rescans your whole library every single knit, which
+# can itself take a while. Only run it once per session if you can help it.
+new_packages <- packages[!(packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, library, character.only = TRUE))
+
+#Read csv
+NEA <- read.csv("cleanData.csv")
+
+#Def target variables
+target_vars <- c("pl_radj", "pl_bmassj", "pl_orbper", "pl_orbeccen", "pl_insol", "pl_dens")
+
+# Make sure all our data is complete
+NEA <- NEA[complete.cases(NEA[, target_vars]), ]
+set.seed(123)
+```
+
+##In the next section, I fill in undefined entries and drop unwanted rows and columns within my excel file.
+``` {r preprocess}
+calc_flags <- c(
+  "<a refstr=CALCULATED_VALUE href=/docs/composite_calc.html target=_blank>Calculated Value</a>",
+  "<a refstr=CALCULATED_VALUE href=/docs/pscp_calc.html target=_blank>Calculated Value</a>"
+)
+NEA <- NEA[!(NEA$pl_radj_reflink %in% calc_flags), ]
+NEA <- NEA[!(NEA$pl_bmassj_reflink %in% calc_flags), ]
+
+# See Data
+#View(NEA)
+```
+
+In the next section I define variables from the archive that represent common planetary features. Exploratory Analysis in R + Network Tutorial
+What defines the similarity of a property between two planets (when do planets have a similar size or temperature)
+
+#Louvain Section
+## Cosine Similarity and Clustering
+```{r 5D Cosine Similarity and Clustering}
+# Set your threshold here
+threshold_value <- 0.97
+
+# 1. Prepare and Log-Transform the target variables
+selected_columns <- NEA[, target_vars]
+
+# Log-transform variables
+log_vars <- c("pl_orbper", "pl_bmassj", "pl_radj", "pl_insol", "pl_dens")
+log_vars <- intersect(log_vars, colnames(selected_columns))
+
+selected_columns_logged <- selected_columns
+for (v in log_vars) {
+  selected_columns_logged[[v]] <- log10(selected_columns_logged[[v]])
+}
+
+# 2. Min-Max Scale the LOGGED columns (keeps values strictly between 0 and 1 for Cosine)
+normalized_columns <- apply(selected_columns_logged, 2, function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+})
+
+TRMOE_NEA <- t(normalized_columns)
+colnames(TRMOE_NEA) <- NEA$pl_name
+rownames(TRMOE_NEA) <- target_vars
+
+# 3. Calculate 5D Cosine Similarity
+cosine_TRMOE_ALL <- lsa::cosine(as.matrix(TRMOE_NEA))
+
+# 4. Keep actual similarity weights, but drop edges below threshold
+cosine_weighted <- cosine_TRMOE_ALL
+cosine_weighted[cosine_weighted < threshold_value] <- 0
+diag(cosine_weighted) <- 0
+
+# 5. Build WEIGHTED network directly from a SPARSE matrix. This saves memory / makes it more efficient
+cosine_sparse <- Matrix::Matrix(cosine_weighted, sparse = TRUE)
+
+cosine_net <- graph_from_adjacency_matrix(
+  cosine_sparse,
+  mode = "undirected",
+  weighted = TRUE,
+  diag = FALSE
+)
+V(cosine_net)$radius <- NEA$pl_radj * 4
+
+# Clean up isolated nodes
+isolated <- which(degree(cosine_net) == 0)
+cosine_net_clean <- delete_vertices(cosine_net, isolated)
+undirected_net <- simplify(cosine_net_clean)
+
+# 6. Run Louvain (automatically respects edge weights!)
+set.seed(123)
+Louvain_Comm <- cluster_louvain(undirected_net)
+
+# Lone Planets Data
+isolated_planet_names <- V(cosine_net)$name[isolated]
+lone_planets_table <- NEA[NEA$pl_name %in% isolated_planet_names, ]
+
+# EXTRACT TO SEPARATE TABLES
+cluster_assignments <- data.frame(
+  pl_name = V(undirected_net)$name,
+  Cluster = Louvain_Comm$membership
+)
+
+# Merge back
+NEA_clustered <- merge(NEA, cluster_assignments, by = "pl_name")
+cluster_tables <- split(NEA_clustered, NEA_clustered$Cluster)
+
+# Calculate Modularity
+mod_score <- modularity(Louvain_Comm)
+print(paste("Network Modularity (Q):", round(mod_score, 4)))
+
+
+#==========================================
+#1. MODULARITY & HIERARCHICAL SUB-CLUSTERING
+#==========================================
+#Create Hierarchy Dataframe
+hierarchy_df <- data.frame(
+  pl_name = V(undirected_net)$name,
+  Main_Cluster = Louvain_Comm$membership,
+  Sub_Cluster = NA
+)
+#Loop for Sub-Clustering
+set.seed(123)
+for (i in unique(hierarchy_df$Main_Cluster)) {
+  nodes_in_cluster <- which(hierarchy_df$Main_Cluster == i)
+  subgraph <- induced_subgraph(undirected_net, nodes_in_cluster)
+  sub_louvain <- cluster_louvain(subgraph)
+  hierarchy_df$Sub_Cluster[nodes_in_cluster] <- paste0(i, ".", sub_louvain$membership)
+}
+#--- SAFELY ADD RADIUS: Uses matching to avoid breaking any downstream merges ---
+hierarchy_df$Node_Radius <- NEA$pl_radj[match(hierarchy_df$pl_name, NEA$pl_name)]
+
+# Attach the hierarchy attributes straight onto undirected_net so we never have
+# to rebuild the graph or recompute cosine similarity again later.
+v_idx <- match(V(undirected_net)$name, hierarchy_df$pl_name)
+V(undirected_net)$Main_Cluster <- hierarchy_df$Main_Cluster[v_idx]
+V(undirected_net)$Sub_Cluster  <- hierarchy_df$Sub_Cluster[v_idx]
+V(undirected_net)$Node_Radius  <- hierarchy_df$Node_Radius[v_idx]
+
+#==========================================
+#2. SUB-CLUSTER CHEAT SHEET (PHYSICAL PROFILES)
+#==========================================
+#1. Merge the datasets together
+NASA_SubClusters <- merge(NEA, hierarchy_df, by = "pl_name")
+print(paste("Data check: Successfully merged", nrow(NASA_SubClusters), "planets!"))
+
+#2. Run the physical profiling calculations using explicit dplyr tags
+SubCluster_Profile <- NASA_SubClusters %>%
+  dplyr::group_by(Sub_Cluster) %>%
+  dplyr::summarize(
+    Count = dplyr::n(),
+    Med_Mass =  round(median(pl_bmassj, na.rm = TRUE), 3),
+    Med_Radius = round(median(pl_radj, na.rm = TRUE), 3),
+    Med_Period = round(median(pl_orbper, na.rm = TRUE), 2),
+    Med_Eccen = round(median(pl_orbeccen, na.rm = TRUE), 3),
+    Med_Insol = round(median(pl_insol, na.rm = TRUE), 1),
+    Med_Dens =  round(median(pl_dens,   na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(Sub_Cluster)
+
+#3. Clean printout
+print(as.data.frame(SubCluster_Profile))
+
+
+# MAIN CLUSTER IDENTIFICATION
+main_cluster_summary <- NASA_SubClusters %>%
+  group_by(Main_Cluster) %>%
+  summarise(
+    Count = n(),
+    Med_Mass = median(pl_bmassj, na.rm = TRUE),
+    Med_Radius = median(pl_radj, na.rm = TRUE),
+    Med_Period = median(pl_orbper, na.rm = TRUE),
+    Med_Eccen = median(pl_orbeccen, na.rm = TRUE),
+    Med_Insol = median(pl_insol, na.rm = TRUE),
+    Med_Dens = median(pl_dens, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# View the summary table
+print(main_cluster_summary)
+
+
+#==========================================
+#3. PREMIUM COLOR DICTIONARY
+#==========================================
+sub_cluster_colors <- c(
+  #Cluster 1: Lava Worlds & Anomalies
+  "1.1" = "#4A0004",
+  "1.2" = "#991A1E",
+  "1.3" = "#DF484E",
+
+  #Cluster 2: Warm Saturns
+  "2.1" = "#0B2545",
+  "2.2" = "#1D528A",
+
+  #Cluster 3: Rocky Core
+  "3.1" = "#75460E",
+  "3.2" = "#C98E2E",
+
+  #Cluster 4: Mega-Hubs
+  "4.1" = "#38125E",
+  "4.2" = "#7F4AB0",
+
+  #Cluster 5: Brown Dwarfs
+  "5.1" = "#144018",
+  "5.2" = "#3CA354",
+  #Cluster 6: Deep Space Cold Worlds
+  "6.1" = "#2B303A",
+  "6.2" = "#8794A6"
+)
+
+## Network visualization
+#```{r Viz 1.0 - Main Clusters, fig.width=12, fig.height=10}
+#==========================================
+# 5. GLOBAL WEIGHTED NETWORK - MAIN CLUSTERS (OPTIMIZED)
+#==========================================
+
+# 1. Define the main cluster color palette
+main_cluster_colors <- c(
+  "1" = "#991A1E", # Crimson Red (Rocky Worlds)
+  "2" = "#1D528A", # Deep Blue (Neptunian Worlds)
+  "3" = "#C98E2E", # Ochre Gold (Gas Giants)
+  "4" = "#7F4AB0", # Amethyst Purple (Eccentric Orbits)
+  "5" = "#3CA354", # Emerald Green (M-Dwarf Neptunes)
+  "6" = "#8794A6"  # Slate Blue-Gray
+)
+
+# We reuse undirected_net from the clustering chunk above instead of rebuilding
+# a second graph from scratch here. It already has Main_Cluster, Sub_Cluster,
+# and Node_Radius attached as vertex attributes, and it's already had isolated
+# nodes stripped out - so this whole viz chunk no longer needs its own copy of
+# the cosine matrix, its own thresholding pass, or its own graph construction.
+global_strict_net <- undirected_net
+
+stretched_layout <- layout_with_fr(
+  global_strict_net,
+  weights = E(global_strict_net)$weight,
+  grid = "grid"
+)
+
+
+# 2. Build the Visual using ggraph
+final_plot <- ggraph(global_strict_net, layout = stretched_layout) +
+  geom_edge_link0(
+    aes(
+      width = weight,
+      alpha = weight,
+      color = as.character(node1.Main_Cluster)
+    )
+  ) +
+  scale_edge_width_continuous(
+    range = c(0.1, 0.8),
+    limits = c(threshold_value, 1.0)
+  ) +
+  scale_edge_alpha_continuous(
+    range = c(0.03, 0.3),
+    limits = c(threshold_value, 1.0)
+  ) +
+  scale_edge_color_manual(values = main_cluster_colors, guide = "none") +
+  geom_node_point(
+    aes(fill = as.character(Main_Cluster), size = Node_Radius),
+    shape = 21,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.90
+  ) +
+  scale_fill_manual(values = main_cluster_colors, na.value = "gray80") +
+  scale_size_continuous(range = c(0.8, 5.0), name = "Planet Radius (Rj)") +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12, color = "gray40"),
+    legend.title = element_text(face = "bold")
+  ) +
+  labs(
+    title = "Exoplanet Network (Main Clusters)",
+    subtitle = paste("Rad, Mass, Period, Eccen, Insol, Dens | (Threshold >=", threshold_value, ")"),
+    fill = "Main Clusters",
+    edge_width = "Similarity Strength",
+    edge_alpha = "Similarity Strength"
+  ) +
+  guides(
+    fill = guide_legend(override.aes = list(size = 5, shape = 21, color = "black"), ncol = 1),
+    size = guide_legend(override.aes = list(fill = "gray40", shape = 21, color = "black"))
+  )
+
+# Save Plot
+ggsave(paste0("6D_LogMinMax_", threshold_value, ".png"), plot = final_plot, width = 13, height = 10, dpi = 300)
+```
+
+``` {r Placeholder}
+I looove science
+```
+
+## Boxplots for the Main Clusters
+```{r MainClusters Boxplot}
+# Step 1: Prepare the data, grouping purely by Main_Cluster
+plot_data <- NASA_SubClusters %>%
+  
+  # We select only Main_Cluster and physical variables now
+  select(Main_Cluster, pl_orbper, pl_bmassj, pl_radj, pl_insol, pl_dens, pl_orbeccen) %>%
+  mutate(
+    `Log10 Period\n(Days)` = log10(pl_orbper),
+    `Log10 Mass\n(Jupiter masses)` = log10(pl_bmassj),
+    `Log10 Radius\n(Jupiter radii)` = log10(pl_radj),
+    `Log10 Insolation\n(Earth Flux)` = log10(pl_insol),
+    `Log10 Density\n(g/cm^3)` = log10(pl_dens),
+    `Eccentricity\n(Linear)` = pl_orbeccen  # Kept linear
+  ) %>%
+  select(-pl_orbper, -pl_bmassj, -pl_radj, -pl_insol, -pl_dens, -pl_orbeccen) %>%
+  
+  # Exclude only Main_Cluster from the pivot
+  pivot_longer(cols = -Main_Cluster, names_to = "Feature", values_to = "Value") %>%
+  mutate(Feature = factor(Feature, levels = c(
+    "Log10 Period\n(Days)", "Log10 Mass\n(Jupiter masses)",
+    "Log10 Radius\n(Jupiter radii)", "Log10 Insolation\n(Earth Flux)",
+    "Log10 Density\n(g/cm^3)", "Eccentricity\n(Linear)"
+  )))
+
+# Define our cohesive palette mapping one color to each of the main clusters
+main_cluster_colors <- c(
+  "1" = "#991A1E", # (Rocky Worlds)
+  "2" = "#1D528A", # (Neptunian Worlds)
+  "3" = "#C98E2E", # (Gas Giants)
+  "4" = "#7F4AB0", # (Eccentric Orbits)
+  "5" = "#3CA354", # (M-Dwarf Neptunes)
+  "6" = "#8794A6"  # If needed
+)
+
+# Step 2: Generate the faceted main cluster box plot
+ggplot(plot_data, aes(x = as.character(Main_Cluster), y = Value, fill = as.character(Main_Cluster))) +
+  geom_boxplot(
+    alpha = 0.7,
+    color = "black",
+    outlier.shape = 1,       # Keeps outliers as hollow circles
+    outlier.size = 1.5,
+    outlier.colour = "black"
+  ) +
+  # Adds a solid black mean dot inside the boxes for mean
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 2.5, color = "black") +
+  
+  # Apply our custom main-cluster color palette
+  scale_fill_manual(values = main_cluster_colors) +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 1) +
+  theme_bw() +
+  labs(
+    title = "Physical Feature Distributions of Planetary Main Clusters",
+    subtitle = "Faceted by Core Network Features",
+    x = "Main Cluster ID",
+    y = "Value (Log10 or Linear)"
+  ) +
+  theme(
+    legend.position = "none", # No legend needed as x-axis labels represent the clusters directly
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10, face = "bold"), # Kept horizontal for clean reading
+    strip.text = element_text(size = 9, face = "bold"),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+
+## Network Metrics
+```{r Network Metrics}
+cat("\n==================================================\n")
+cat("            1. GLOBAL NETWORK METRICS              \n")
+cat("==================================================\n")
+
+# Network Density: What percentage of all possible connections actually exist?
+net_density <- igraph::edge_density(undirected_net)
+cat("Global Network Density:", round(net_density, 5), "\n")
+
+# Global Clustering Coefficient: Do similar exoplanets form tight, interconnected triads?
+net_transitivity <- igraph::transitivity(undirected_net, type = "global")
+cat("Global Clustering Coefficient (Transitivity):", round(net_transitivity, 4), "\n")
+
+
+cat("\n==================================================\n")
+cat("            2. NETWORK TOPOLOGY & SHAPE            \n")
+cat("==================================================\n")
+
+# Average Path Length: On average, how many similarity steps separate any two random planets?
+avg_path_length <- igraph::mean_distance(undirected_net, directed = FALSE)
+cat("Average Path Length (Degrees of Separation):", round(avg_path_length, 2), "steps\n")
+
+# Network Diameter: What is the longest shortest-path across the entire exoplanet catalog?
+net_diameter <- igraph::diameter(undirected_net, directed = FALSE)
+cat("Network Diameter (Maximum Distance across Graph):", net_diameter, "steps\n")
+
+
+cat("\n==================================================\n")
+cat("            3. LOCAL NODE-LEVEL METRICS            \n")
+cat("==================================================\n")
+
+# A. Degree Centrality (Local Hubs: Planets with the highest volume of close neighbors)
+local_degrees <- igraph::degree(undirected_net)
+top_hubs <- head(sort(local_degrees, decreasing = TRUE), 5)
+
+hubs_df <- data.frame(
+  Planet_Hubs = names(top_hubs),
+  Direct_Connections = as.vector(top_hubs)
+)
+cat("Top 5 Local Core Hubs (High Degree Centrality):\n")
+print(as.data.frame(hubs_df))
+cat("\n")
+
+# B. Betweenness Centrality (Local Bridges: Planets that connect separate evolutionary regimes)
+local_betweenness <- igraph::betweenness(undirected_net, directed = FALSE)
+top_bridges <- head(sort(local_betweenness, decreasing = TRUE), 5)
+
+bridges_df <- data.frame(
+  Planet_Bridges = names(top_bridges),
+  Bridge_Score = round(as.vector(top_bridges), 2),
+  Connections = as.vector(igraph::degree(undirected_net)[names(top_bridges)])
+)
+cat("Top 5 Exoplanet Bridges (High Betweenness Centrality):\n")
+print(as.data.frame(bridges_df))
+
+# Filter the main dataset to pull the exact physical profiles of your 5 bridges
+# Note: Fixed the trailing comma after pl_insol to prevent syntax crashes!
+bridge_physical_profiles <- NEA_clustered %>%
+  dplyr::filter(pl_name %in% names(top_bridges)) %>%
+  dplyr::select(
+    pl_name,
+    pl_radj,       # Radius (Jupiter radii)
+    pl_bmassj,     # Mass (Jupiter mass)
+    pl_dens,       # Density
+    pl_orbper,     # Orbital Period (Days)
+    pl_orbeccen,   # Eccentricity
+    pl_insol       # Insolation Flux
+  )
+
+cat("\n==================================================\n")
+cat("      PHYSICAL TRAITS OF THE TOP 5 BRIDGES          \n")
+cat("==================================================\n")
+print(as.data.frame(bridge_physical_profiles))
+
+
+# A. Degree Assortativity
+net_assortativity <- igraph::assortativity_degree(undirected_net)
+cat("Degree Assortativity Coefficient:", round(net_assortativity, 4), "\n")
+if(net_assortativity > 0) {
+  cat("  -> Positive: Hubs tend to connect to other Hubs (Rich-Club effect).\n\n")
+} else {
+  cat("  -> Negative: Hubs tend to connect to lower-degree fringe nodes.\n\n")
+}
+
+# B. Closeness Centrality (Top 5 "Baseline" Planets)
+local_closeness <- igraph::closeness(undirected_net, normalized = TRUE)
+top_closeness <- head(sort(local_closeness, decreasing = TRUE), 5)
+
+closeness_df <- data.frame(
+  Planet = names(top_closeness),
+  Closeness_Score = round(as.vector(top_closeness), 4)
+)
+cat("Top 5 Highest Closeness Centrality (Most accessible from anywhere in the network):\n")
+print(as.data.frame(closeness_df))
+cat("\n")
+
+# C. Eigenvector Centrality (Top 5 "Most Influential" Planets)
+local_eigen <- igraph::eigen_centrality(undirected_net)$vector
+top_eigen <- head(sort(local_eigen, decreasing = TRUE), 5)
+
+eigen_df <- data.frame(
+  Planet = names(top_eigen),
+  Eigen_Score = round(as.vector(top_eigen), 4)
+)
+cat("Top 5 Highest Eigenvector Centrality (Connected to the most important Hubs):\n")
+print(as.data.frame(eigen_df))
+
+# ==========================================
+# 12. ADVANCED TOPOLOGY: STRUCTURAL BOTTLENECKS
+# ==========================================
+
+cat("\n==================================================\n")
+cat("      5. STRUCTURAL BOTTLENECKS & TIE STRENGTH     \n")
+cat("==================================================\n")
+
+# A. Articulation Points (Single Points of Failure)
+# Identifies individual planets that, if removed, would snap the network into disconnected pieces.
+art_points_idx <- igraph::articulation_points(undirected_net)
+art_planets <- V(undirected_net)$name[art_points_idx]
+
+cat("Articulation Points (Critical Evolutionary Bottlenecks):\n")
+if(length(art_planets) > 0) {
+  print(art_planets)
+} else {
+  cat("None found! Your network density is so high that there is no single point of failure.\n")
+}
+
+cat("\n")
+
+# B. Edge Betweenness (Top 5 Most Critical Similarity Ties)
+# Identifies the specific *connections* (not just planets) that bridge the largest structural gaps.
+eb_scores <- igraph::edge_betweenness(undirected_net, directed = FALSE)
+top_eb_idx <- order(eb_scores, decreasing = TRUE)[1:5]
+top_edges <- igraph::E(undirected_net)[top_eb_idx]
+
+# Extract the exact planet pairs holding these critical edges together
+edge_list <- igraph::ends(undirected_net, top_edges)
+
+eb_df <- data.frame(
+  Planet_A = edge_list[, 1],
+  Planet_B = edge_list[, 2],
+  Edge_Betweenness_Score = round(eb_scores[top_eb_idx], 2)
+)
+
+cat("Top 5 Most Critical Similarity Ties (Edge Betweenness):\n")
+print(as.data.frame(eb_df))
+```
