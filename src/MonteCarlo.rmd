@@ -1,0 +1,345 @@
+---
+title: "MonteCarlo"
+author: "Mo"
+date: "2026-06-04"
+output:
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Setup}
+# ====================================================================
+# SETUP AND DATA PREP
+# ====================================================================
+packages <- c("igraph", "lsa", "dplyr", "Matrix", "ggplot2", "tidyr", "dplyr")
+new_packages <- packages[!(packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) install.packages(new_packages)
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+
+```{r MONTE CARLO}
+NEA <- read.csv("cleanData.csv")
+target_vars <- c("pl_radj", "pl_bmassj", "pl_orbper", "pl_orbeccen", "pl_insol", "pl_dens")
+NEA <- NEA[complete.cases(NEA[, target_vars]), ]
+
+calc_flags <- c(
+  "<a refstr=CALCULATED_VALUE href=/docs/composite_calc.html target=_blank>Calculated Value</a>",
+  "<a refstr=CALCULATED_VALUE href=/docs/pscp_calc.html target=_blank>Calculated Value</a>"
+)
+NEA <- NEA[!(NEA$pl_radj_reflink %in% calc_flags), ]
+NEA <- NEA[!(NEA$pl_bmassj_reflink %in% calc_flags), ]
+
+# ====================================================================
+# MONTE CARLO SIMULATION INITIALIZATION
+# ====================================================================
+num_runs <- 100
+threshold_value <- 0.97
+log_vars <- c("pl_orbper", "pl_bmassj", "pl_radj", "pl_insol", "pl_dens")
+
+# Arrays to store global metrics
+communities_count <- numeric(num_runs)
+
+# List to store the cluster medians from every run
+mc_results_list <- list()
+
+print(paste("Starting", num_runs, "Monte Carlo iterations..."))
+
+# ====================================================================
+# MONTE CARLO LOOP
+# ====================================================================
+
+for (i in 1:num_runs) {
+  
+  # 1. Sub-sample 90% of the dataset to induce variance
+  #sample_idx <- sample(nrow(NEA), size = floor(0.9 * nrow(NEA)), replace = FALSE)
+  #NEA_sim <- NEA[sample_idx, ]
+  
+  # Use 100% OF THE DATA
+  NEA_sim <- NEA
+  
+  # 2. Prepare and Log-Transform
+  selected_columns_logged <- NEA_sim[, target_vars]
+  valid_log_vars <- intersect(log_vars, colnames(selected_columns_logged))
+  
+  for (v in valid_log_vars) {
+    selected_columns_logged[[v]] <- log10(selected_columns_logged[[v]])
+  }
+  
+  # 3. Min-Max Scaling
+  normalized_columns <- apply(selected_columns_logged, 2, function(x) {
+    (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+  })
+  
+  TRMOE_NEA <- t(normalized_columns)
+  colnames(TRMOE_NEA) <- NEA_sim$pl_name
+  
+  # 4. Cosine Similarity & Thresholding
+  cosine_matrix <- lsa::cosine(as.matrix(TRMOE_NEA))
+  cosine_matrix[cosine_matrix < threshold_value] <- 0
+  diag(cosine_matrix) <- 0
+  
+  # 5. Build Network & Clean Isolates
+  cosine_sparse <- Matrix::Matrix(cosine_matrix, sparse = TRUE)
+  cosine_net <- graph_from_adjacency_matrix(cosine_sparse, mode = "undirected", weighted = TRUE, diag = FALSE)
+  
+  isolated <- which(degree(cosine_net) == 0)
+  cosine_net_clean <- delete_vertices(cosine_net, isolated)
+  undirected_net <- simplify(cosine_net_clean)
+  
+  # 6. Run Louvain
+  Louvain_Comm <- cluster_louvain(undirected_net)
+  communities_count[i] <- length(Louvain_Comm)
+  
+  # 7. Create Assignments & Merge Back
+  cluster_assignments <- data.frame(
+    pl_name = V(undirected_net)$name,
+    Cluster = as.character(Louvain_Comm$membership)
+  )
+  NEA_clustered <- merge(NEA_sim, cluster_assignments, by = "pl_name")
+  
+  # 8.1 Calculate MEDIANS for each in this run
+  # run_summary <- NEA_clustered %>%
+  #   dplyr::group_by(Cluster) %>%
+  #   dplyr::summarize(
+  #     Run_ID = i, # Tag the run number
+  #     Count = dplyr::n(),
+      # Med_Mass = median(pl_bmassj, na.rm = TRUE),
+      # Med_Radius = median(pl_radj, na.rm = TRUE),
+      # Med_Period = median(pl_orbper, na.rm = TRUE),
+      # Med_Eccen = median(pl_orbeccen, na.rm = TRUE),
+      # Med_Insol = median(pl_insol, na.rm = TRUE),
+      # Med_Dens = median(pl_dens, na.rm = TRUE),
+  #     .groups = "drop"
+  #   )
+  
+  # 8.2 Calculate MEANS for each cluster in this run
+  run_summary <- NEA_clustered %>%
+    dplyr::group_by(Cluster) %>%
+    dplyr::summarize(
+      Run_ID = i, # Tag the run number
+      Count = dplyr::n(),
+      Mean_Mass = mean(pl_bmassj, na.rm = TRUE),
+      Mean_Radius = mean(pl_radj, na.rm = TRUE),
+      Mean_Period = mean(pl_orbper, na.rm = TRUE),
+      Mean_Eccen = mean(pl_orbeccen, na.rm = TRUE),
+      Mean_Insol = mean(pl_insol, na.rm = TRUE),
+      Mean_Dens = mean(pl_dens, na.rm = TRUE),
+      Med_Mass = median(pl_bmassj, na.rm = TRUE),
+      Med_Radius = median(pl_radj, na.rm = TRUE),
+      Med_Period = median(pl_orbper, na.rm = TRUE),
+      Med_Eccen = median(pl_orbeccen, na.rm = TRUE),
+      Med_Insol = median(pl_insol, na.rm = TRUE),
+      Med_Dens = median(pl_dens, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Save this run's cluster table into our master list
+  mc_results_list[[i]] <- run_summary
+  
+  if (i %% 10 == 0) {
+    print(paste("Completed run", i, "of", num_runs))
+  }
+}
+
+
+# ====================================================================
+# AGGREGATE RESULTS
+# ====================================================================
+# Bind all 100 runs into one master dataframe
+MC_Master_Data <- dplyr::bind_rows(mc_results_list)
+
+# Switches Run_ID and cluster
+MC_Master_Data <- MC_Master_Data %>%
+  dplyr::select(Run_ID, Cluster, dplyr::everything())
+
+print("==================================================")
+print("          MONTE CARLO SIMULATION COMPLETE         ")
+print("==================================================")
+print(paste("Average Communities Found per Run:", round(mean(communities_count), 2)))
+print("Preview of your per-cluster data across runs:")
+print(head(MC_Master_Data))
+write.csv(MC_Master_Data, "Monte_Carlo_Cluster_Results.csv", row.names = FALSE)
+```
+
+# Just in case
+```{r}
+MC_Master_Data <- read.csv("Monte_Carlo_Cluster_Results.csv")
+```
+
+# Number of Communities versus Run ID
+```{r Graph 1}
+plot(table(MC_Master_Data$Run_ID), type = "o", col = "blue", xlab = "Run ID", ylab = "Communities Detected", main = "Network Stability")
+```
+
+# Organizing the clusters so each cluster in each run lines up
+```{r Organize}
+MC_Master_Data <- MC_Master_Data %>%
+  dplyr::mutate(
+    True_Cluster = dplyr::case_when(
+      # 1. If Louvain originally called it Cluster 4, lock it in as Cluster 4
+      Cluster == 4 | Cluster == "4" ~ "Cluster 4",
+      
+      # 2. Otherwise, apply our physical thresholds to fix the label switching
+      Mean_Radius < 0.5 ~ "1_SubNeptunes_SuperEarths",
+      Mean_Eccen > 0.2 ~ "3_Eccentric_Giants",
+      Mean_Radius > 1.0 & Mean_Eccen < 0.1 ~ "2_Hot_Jupiters",
+      
+      # 3. Catch-all just in case anything slips through
+      TRUE ~ "Unclassified" 
+    )
+  )
+
+# Print the results to the console
+cluster_verification <- MC_Master_Data %>%
+  dplyr::count(True_Cluster, name = "Total_Occurrences")
+print("--- Verification of True Cluster Assignments ---")
+print(cluster_verification)
+```
+
+# Cluster 1 ALL runs data
+```{r}
+# 1. Filter out only the First True Cluster
+cluster1_data <- MC_Master_Data %>%
+  dplyr::filter(True_Cluster == "1_SubNeptunes_SuperEarths")
+
+# 2. Reshape the data so ggplot can easily make a 3x2 grid
+cluster1_long <- cluster1_data %>%
+  tidyr::pivot_longer(
+    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
+    names_to = "Variable",
+    values_to = "Med_Value"
+  )
+
+# 3. Calculate the overall average for each variable (for the RED dotted line)
+averages_data <- cluster1_long %>%
+  dplyr::group_by(Variable) %>%
+  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
+
+# 4. Build the faceted plot
+dashboard_plot <- ggplot(cluster1_long, aes(x = Run_ID, y = Med_Value)) +
+  geom_line(color = "#75460E", alpha = 0.7) + 
+  geom_point(color = "#75460E", size = 1.5) +
+  # Add the RED dotted line using the averages we just calculated
+  geom_hline(data = averages_data, aes(yintercept = Total_Avg), 
+             color = "red", linetype = "dotted", size = 1) +
+  # facet_wrap builds the 3x2 grid (ncol = 2 means 2 columns, so 3 rows)
+  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
+  labs(
+    title = "Cluster 1 (Sub-Neptunes) Stability Across 100 Runs",
+    x = "Run ID",
+    y = "Median Value"
+  ) +
+  theme_bw() + # A clean theme with borders around each plot
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+# 5. Display the plot
+print(dashboard_plot)
+```
+
+# Cluster 2 ALL runs data
+```{r}
+cluster2_data <- MC_Master_Data %>%
+  dplyr::filter(True_Cluster == "2_Hot_Jupiters")
+
+# 2. Reshape the data for the 3x2 grid
+cluster2_long <- cluster2_data %>%
+  tidyr::pivot_longer(
+    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
+    names_to = "Variable",
+    values_to = "Med_Value"
+  )
+
+# 3. Calculate the overall average for each variable (RED dotted line)
+averages_data_c2 <- cluster2_long %>%
+  dplyr::group_by(Variable) %>%
+  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
+
+# 4. Build the faceted plot
+dashboard_plot_c2 <- ggplot(cluster2_long, aes(x = Run_ID, y = Med_Value)) +
+  geom_line(color = "#75460E", alpha = 0.7) + # Using your Warm Saturns blue
+  geom_point(color = "#75460E", size = 1.5) +
+  geom_hline(data = averages_data_c2, aes(yintercept = Total_Avg), 
+             color = "red", linetype = "dotted", size = 1) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
+  labs(
+    title = "Cluster 2 (Hot Jupiters) Stability Across 100 Runs",
+    x = "Run ID",
+    y = "Median Value"
+  ) +
+  theme_bw() + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+# 5. Display the plot
+print(dashboard_plot_c2)
+```
+
+# Cluster 3 ALL runs data
+```{r}
+cluster3_data <- MC_Master_Data %>%
+  dplyr::filter(True_Cluster == "3_Eccentric_Giants")
+
+# 2. Reshape the data for the 3x2 grid
+cluster3_long <- cluster3_data %>%
+  tidyr::pivot_longer(
+    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
+    names_to = "Variable",
+    values_to = "Med_Value"
+  )
+
+# 3. Calculate the overall average for each variable (RED dotted line)
+averages_data_c3 <- cluster3_long %>%
+  dplyr::group_by(Variable) %>%
+  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
+
+# 4. Build the faceted plot
+dashboard_plot_c3 <- ggplot(cluster3_long, aes(x = Run_ID, y = Med_Value)) +
+  geom_line(color = "#75460E", alpha = 0.7) + # Using your Rocky Core gold
+  geom_point(color = "#75460E", size = 1.5) +
+  geom_hline(data = averages_data_c3, aes(yintercept = Total_Avg), 
+             color = "red", linetype = "dotted", size = 1) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
+  labs(
+    title = "Cluster 3 (Eccentric Giants) Stability Across 100 Runs",
+    x = "Run ID",
+    y = "Median Value"
+  ) +
+  theme_bw() + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+# 5. Display the plot
+print(dashboard_plot_c3)
+```
+
+# Master Summary Table
+```{r}
+master_summary_table <- MC_Master_Data %>%
+  dplyr::group_by(True_Cluster) %>%
+  dplyr::summarize(
+    Avg_Count      = round(mean(Count, na.rm = TRUE), 0),
+    Avg_Med_Mass   = round(mean(Med_Mass, na.rm = TRUE), 4),
+    Avg_Med_Radius = round(mean(Med_Radius, na.rm = TRUE), 4),
+    Avg_Med_Period = round(mean(Med_Period, na.rm = TRUE), 2),
+    Avg_Med_Eccen  = round(mean(Med_Eccen, na.rm = TRUE), 4),
+    Avg_Med_Insol  = round(mean(Med_Insol, na.rm = TRUE), 2),
+    Avg_Med_Dens   = round(mean(Med_Dens, na.rm = TRUE), 4),
+    .groups = "drop"
+  )
+
+# Display the master summary table
+print(master_summary_table)
+```
