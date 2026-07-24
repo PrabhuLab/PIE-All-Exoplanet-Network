@@ -233,6 +233,18 @@ sub_cluster_colors <- c(
   "6.1" = "#2B303A",
   "6.2" = "#8794A6"
 )
+
+# We reuse undirected_net from the clustering chunk above instead of rebuilding
+# a second graph from scratch here. It already has Main_Cluster, Sub_Cluster,
+# and Node_Radius attached as vertex attributes, and it's already had isolated
+# nodes stripped out - this is used in both Viz's
+global_strict_net <- undirected_net
+
+stretched_layout <- layout_with_fr(
+  global_strict_net,
+  weights = E(global_strict_net)$weight,
+  grid = "grid"
+)
 ```
 ## Network visualization
 # Subcluster Viz
@@ -311,19 +323,6 @@ main_cluster_colors <- c(
   "4" = "#7F4AB0", # Amethyst Purple (Eccentric Orbits)
   "5" = "#3CA354", # Emerald Green (M-Dwarf Neptunes)
   "6" = "#8794A6"  # Slate Blue-Gray
-)
-
-# We reuse undirected_net from the clustering chunk above instead of rebuilding
-# a second graph from scratch here. It already has Main_Cluster, Sub_Cluster,
-# and Node_Radius attached as vertex attributes, and it's already had isolated
-# nodes stripped out - so this whole viz chunk no longer needs its own copy of
-# the cosine matrix, its own thresholding pass, or its own graph construction.
-global_strict_net <- undirected_net
-
-stretched_layout <- layout_with_fr(
-  global_strict_net,
-  weights = E(global_strict_net)$weight,
-  grid = "grid"
 )
 
 
