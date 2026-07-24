@@ -233,9 +233,72 @@ sub_cluster_colors <- c(
   "6.1" = "#2B303A",
   "6.2" = "#8794A6"
 )
-
+```
 ## Network visualization
-#```{r Viz 1.0 - Main Clusters, fig.width=12, fig.height=10}
+# Subcluster Viz
+```{r Subcluster visualization}
+#==========================================
+# 6. GLOBAL WEIGHTED NETWORK - SUB-CLUSTERS
+#==========================================
+
+# Reuse undirected_net and the exact layout from the main cluster plot
+global_strict_net <- undirected_net
+
+# Build the Visual using ggraph mapped to Sub_Cluster
+final_sub_plot <- ggraph(global_strict_net, layout = stretched_layout) +
+  geom_edge_link0(
+    aes(
+      width = weight,
+      alpha = weight,
+      color = as.character(node1.Sub_Cluster)
+    )
+  ) +
+  scale_edge_width_continuous(
+    range = c(0.1, 0.8),
+    limits = c(threshold_value, 1.0)
+  ) +
+  scale_edge_alpha_continuous(
+    range = c(0.03, 0.3),
+    limits = c(threshold_value, 1.0)
+  ) +
+  scale_edge_color_manual(values = sub_cluster_colors, guide = "none") +
+  geom_node_point(
+    aes(fill = as.character(Sub_Cluster), size = Node_Radius),
+    shape = 21,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.90
+  ) +
+  scale_fill_manual(values = sub_cluster_colors, na.value = "gray80") +
+  scale_size_continuous(range = c(0.8, 5.0), name = "Planet Radius (Rj)") +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12, color = "gray40"),
+    legend.title = element_text(face = "bold")
+  ) +
+  labs(
+    title = "Exoplanet Network (Sub-Clusters)",
+    subtitle = paste("Rad, Mass, Period, Eccen, Insol, Dens | (Threshold >=", threshold_value, ")"),
+    fill = "Sub-Clusters",
+    edge_width = "Similarity Strength",
+    edge_alpha = "Similarity Strength"
+  ) +
+  guides(
+    fill = guide_legend(override.aes = list(size = 5, shape = 21, color = "black"), ncol = 1),
+    size = guide_legend(override.aes = list(fill = "gray40", shape = 21, color = "black"))
+  )
+
+# Save Plot
+ggsave(paste0("6D_SubClusters_LogMinMax_", threshold_value, ".png"), plot = final_sub_plot, width = 13, height = 10, dpi = 300)
+
+# Render plot in RStudio viewer
+print(final_sub_plot)
+```
+
+```{r Viz 1.0 - Main Clusters, fig.width=12, fig.height=10}
 #==========================================
 # 5. GLOBAL WEIGHTED NETWORK - MAIN CLUSTERS (OPTIMIZED)
 #==========================================
