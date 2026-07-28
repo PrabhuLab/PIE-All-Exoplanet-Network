@@ -217,10 +217,12 @@ sub_cluster_colors <- c(
   #Cluster 2: Warm Saturns
   "2.1" = "#0B2545",
   "2.2" = "#1D528A",
+  "2.3" = "lightblue",
 
   #Cluster 3: Rocky Core
   "3.1" = "#75460E",
   "3.2" = "#C98E2E",
+  "3.3" = "lightyellow",
 
   #Cluster 4: Mega-Hubs
   "4.1" = "#38125E",
@@ -246,6 +248,63 @@ stretched_layout <- layout_with_fr(
   grid = "grid"
 )
 ```
+
+### Historgrams
+
+## Historgrams
+```{r}
+#==========================================
+# 4. 3x3 SUB-CLUSTER HISTOGRAM DATAGRAMS (WITH COUNTS & FIXED SCALES)
+#==========================================
+
+# 1. Get the counts for the top 9 sub-clusters
+top9_counts <- sort(table(NASA_SubClusters$Sub_Cluster), decreasing = TRUE)[1:9]
+top9_subclusters <- names(top9_counts)
+
+# 2. Create a custom label dictionary (e.g., maps "1.1" to "1.1 (n=345)")
+# This changes the text on the plot without breaking the color mapping!
+custom_strip_labels <- paste0(names(top9_counts), " (n = ", as.numeric(top9_counts), ")")
+names(custom_strip_labels) <- names(top9_counts)
+
+# Loop through each of the 6 target variables
+for (var in target_vars) {
+  
+  # Build the base plot
+  p <- ggplot(subset(NASA_SubClusters, Sub_Cluster %in% top9_subclusters), 
+              aes(x = .data[[var]], fill = Sub_Cluster)) +
+    geom_histogram(bins = 30, color = "black", alpha = 0.85) +
+    scale_fill_manual(values = sub_cluster_colors) +
+    
+    # CHANGED: set scales = "fixed" to lock both X and Y axes across all panels
+    facet_wrap(~ Sub_Cluster, ncol = 3, nrow = 3, scales = "fixed", axes = "all",
+               labeller = as_labeller(custom_strip_labels)) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      strip.background = element_rect(fill = "gray20", color = NA),
+      strip.text = element_text(color = "white", face = "bold"),
+      panel.border = element_rect(color = "gray80", fill = NA)
+    ) +
+    labs(
+      title = paste("3x3 Histogram:", var),
+      x = var, 
+      y = "Planet Count"
+    )
+  
+  # Apply a log10 scale to variables with large ranges (skip eccentricity)
+  if (var != "pl_orbeccen") {
+    p <- p + scale_x_log10(labels = scales::label_comma())
+  }
+  
+  # Render the plot in the loop
+  print(p)
+}
+```
+
+
+
 ## Network visualization
 # Subcluster Viz
 ```{r Subcluster visualization}
