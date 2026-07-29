@@ -101,6 +101,9 @@ for (i in 1:num_runs) {
   sub_assignments_list <- list()
   c1_subs <- 0; c2_subs <- 0; c3_subs <- 0
   
+  # Set up continuous counters for clean naming (1.1, 1.2, etc.)
+  sub_counters <- list("1" = 1, "2" = 1, "3" = 1)
+  
   for (mc in unique(temp_assignments$Main_Cluster)) {
     true_m <- main_to_true_dict[as.character(mc)]
     nodes_in_mc <- which(Louvain_Comm$membership == mc)
@@ -108,16 +111,27 @@ for (i in 1:num_runs) {
     if (length(nodes_in_mc) > 2) {
       subgraph <- induced_subgraph(undirected_net, nodes_in_mc)
       sub_louvain <- cluster_louvain(subgraph)
+      num_subs <- length(sub_louvain)
       
-      # Track community counts
-      if(true_m == "1") c1_subs <- c1_subs + length(sub_louvain)
-      if(true_m == "2") c2_subs <- c2_subs + length(sub_louvain)
-      if(true_m == "3") c3_subs <- c3_subs + length(sub_louvain)
+      # Track overall community counts for the line graph
+      if (true_m == "1") c1_subs <- c1_subs + num_subs
+      if (true_m == "2") c2_subs <- c2_subs + num_subs
+      if (true_m == "3") c3_subs <- c3_subs + num_subs
       
+      # Generate clean names and increment the counter
+      if (true_m %in% c("1", "2", "3")) {
+         start_idx <- sub_counters[[true_m]]
+         clean_names <- paste0(true_m, ".", start_idx:(start_idx + num_subs - 1))
+         sub_counters[[true_m]] <- sub_counters[[true_m]] + num_subs
+      } else {
+         clean_names <- paste0("Other.", 1:num_subs)
+      }
+      
+      # Assign the clean names to the planets
       sub_assignments_list[[as.character(mc)]] <- data.frame(
         pl_name = V(subgraph)$name,
         True_Main = true_m,
-        Sub_Cluster_Raw = paste0(true_m, ".", sub_louvain$membership)
+        Sub_Cluster_Raw = clean_names[sub_louvain$membership]
       )
     }
   }
@@ -143,6 +157,13 @@ for (i in 1:num_runs) {
       Med_Eccen = median(pl_orbeccen, na.rm = TRUE),
       Med_Insol = median(pl_insol, na.rm = TRUE),
       Med_Dens = median(pl_dens, na.rm = TRUE),
+      
+      Mean_Mass = mean(pl_bmassj, na.rm = TRUE),
+      Mean_Radius = mean(pl_radj, na.rm = TRUE),
+      Mean_Period = mean(pl_orbper, na.rm = TRUE),
+      Mean_Eccen = mean(pl_orbeccen, na.rm = TRUE),
+      Mean_Insol = mean(pl_insol, na.rm = TRUE),
+      Mean_Dens = mean(pl_dens, na.rm = TRUE),
       .groups = "drop"
     )
   
@@ -163,194 +184,54 @@ write.csv(MC_Master_Data, "MC_SubCluster_Results.csv", row.names = FALSE)
 
 # Just in case
 ```{r}
-MC_Master_Data <- read.csv("Monte_Carlo_Cluster_Results.csv")
+MC_Master_Data <- read.csv("MC_SubCluster_Results.csv")
 ```
 
 # Number of Communities versus Run ID
 ```{r Graph 1}
-# Reshape the counts dataframe for ggplot
-sub_counts_long <- sub_counts_df %>%
-  tidyr::pivot_longer(
-    cols = starts_with("Cluster_"),
-    names_to = "Main_Cluster",
-    values_to = "Sub_Count"
-  ) %>%
-  dplyr::mutate(Main_Cluster = factor(Main_Cluster, labels = c("Cluster 1 (Small)", "Cluster 2 (Hot Jups)", "Cluster 3 (Eccentric)")))
-
-# Plot the 3 lines with the exact color palette
+# Number of Sub-Communities per Run ID (Faceted 3x1)
 ggplot(sub_counts_long, aes(x = Run_ID, y = Sub_Count, color = Main_Cluster)) +
-  geom_line(alpha = 0.8, linewidth = 1) +
-  geom_point(size = 1.5, alpha = 0.8) +
+  geom_line(alpha = 0.75, linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  
+  # Split into 3 stacked plots sharing the same X-axis
+  facet_wrap(~ Main_Cluster, ncol = 1) +
+  
   scale_color_manual(values = c(
     "Cluster 1 (Small)" = "#991A1E", 
     "Cluster 2 (Hot Jups)" = "#1D528A", 
     "Cluster 3 (Eccentric)" = "#C98E2E"
   )) +
-  theme_minimal(base_size = 14) +
-  labs(
-    title = "Network Stability: Sub-Communities Detected per Main Cluster",
-    x = "Run ID",
-    y = "Number of Sub-Communities",
-    color = "Parent Cluster"
-  ) +
-  theme(plot.title = element_text(face = "bold", hjust = 0.5))
-```
-
-# Organizing the clusters so each cluster in each run lines up CURRENT LINE
-```{r Organize}
-MC_Master_Data <- MC_Master_Data %>%
-  dplyr::mutate(
-    True_Cluster = dplyr::case_when(
-      # 1. If Louvain originally called it Cluster 4, lock it in as Cluster 4
-      Cluster == 4 | Cluster == "4" ~ "Cluster 4",
-      
-      # 2. Otherwise, apply our physical thresholds to fix the label switching
-      Mean_Radius < 0.5 ~ "1_SubNeptunes_SuperEarths",
-      Mean_Eccen > 0.2 ~ "3_Eccentric_Giants",
-      Mean_Radius > 1.0 & Mean_Eccen < 0.1 ~ "2_Hot_Jupiters",
-      
-      # 3. Catch-all just in case anything slips through
-      TRUE ~ "Unclassified" 
-    )
-  )
-
-# Print the results to the console
-cluster_verification <- MC_Master_Data %>%
-  dplyr::count(True_Cluster, name = "Total_Occurrences")
-print("--- Verification of True Cluster Assignments ---")
-print(cluster_verification)
-```
-
-# Cluster 1 ALL runs data
-```{r}
-# 1. Filter out only the First True Cluster
-cluster1_data <- MC_Master_Data %>%
-  dplyr::filter(True_Cluster == "1_SubNeptunes_SuperEarths")
-
-# 2. Reshape the data so ggplot can easily make a 3x2 grid
-cluster1_long <- cluster1_data %>%
-  tidyr::pivot_longer(
-    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
-    names_to = "Variable",
-    values_to = "Med_Value"
-  )
-
-# 3. Calculate the overall average for each variable (for the RED dotted line)
-averages_data <- cluster1_long %>%
-  dplyr::group_by(Variable) %>%
-  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
-
-# 4. Build the faceted plot
-dashboard_plot <- ggplot(cluster1_long, aes(x = Run_ID, y = Med_Value)) +
-  geom_line(color = "#75460E", alpha = 0.7) + 
-  geom_point(color = "#75460E", size = 1.5) +
-  # Add the RED dotted line using the averages we just calculated
-  geom_hline(data = averages_data, aes(yintercept = Total_Avg), 
-             color = "red", linetype = "dotted", size = 1) +
-  # facet_wrap builds the 3x2 grid (ncol = 2 means 2 columns, so 3 rows)
-  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
-  labs(
-    title = "Cluster 1 (Sub-Neptunes) Stability Across 100 Runs",
-    x = "Run ID",
-    y = "Median Value"
-  ) +
-  theme_bw() + # A clean theme with borders around each plot
+  
+  # Lock Y-axis to clean integer ticks (2, 3, 4)
+  scale_y_continuous(breaks = c(2, 3, 4), limits = c(1.8, 4.2)) +
+  
+  theme_minimal(base_size = 13) +
   theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    strip.background = element_rect(fill = "gray90"),
-    strip.text = element_text(face = "bold")
-  )
-
-# 5. Display the plot
-print(dashboard_plot)
-```
-
-# Cluster 2 ALL runs data
-```{r}
-cluster2_data <- MC_Master_Data %>%
-  dplyr::filter(True_Cluster == "2_Hot_Jupiters")
-
-# 2. Reshape the data for the 3x2 grid
-cluster2_long <- cluster2_data %>%
-  tidyr::pivot_longer(
-    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
-    names_to = "Variable",
-    values_to = "Med_Value"
-  )
-
-# 3. Calculate the overall average for each variable (RED dotted line)
-averages_data_c2 <- cluster2_long %>%
-  dplyr::group_by(Variable) %>%
-  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
-
-# 4. Build the faceted plot
-dashboard_plot_c2 <- ggplot(cluster2_long, aes(x = Run_ID, y = Med_Value)) +
-  geom_line(color = "#75460E", alpha = 0.7) + # Using your Warm Saturns blue
-  geom_point(color = "#75460E", size = 1.5) +
-  geom_hline(data = averages_data_c2, aes(yintercept = Total_Avg), 
-             color = "red", linetype = "dotted", size = 1) +
-  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
-  labs(
-    title = "Cluster 2 (Hot Jupiters) Stability Across 100 Runs",
-    x = "Run ID",
-    y = "Median Value"
+    legend.position = "none", # Legend is redundant now because panel headers label the clusters
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    strip.background = element_rect(fill = "gray20", color = NA),
+    strip.text = element_text(color = "white", face = "bold"),
+    panel.border = element_rect(color = "gray80", fill = NA)
   ) +
-  theme_bw() + 
-  theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    strip.background = element_rect(fill = "gray90"),
-    strip.text = element_text(face = "bold")
-  )
-
-# 5. Display the plot
-print(dashboard_plot_c2)
-```
-
-# Cluster 3 ALL runs data
-```{r}
-cluster3_data <- MC_Master_Data %>%
-  dplyr::filter(True_Cluster == "3_Eccentric_Giants")
-
-# 2. Reshape the data for the 3x2 grid
-cluster3_long <- cluster3_data %>%
-  tidyr::pivot_longer(
-    cols = c(Med_Mass, Med_Radius, Med_Period, Med_Eccen, Med_Insol, Med_Dens),
-    names_to = "Variable",
-    values_to = "Med_Value"
-  )
-
-# 3. Calculate the overall average for each variable (RED dotted line)
-averages_data_c3 <- cluster3_long %>%
-  dplyr::group_by(Variable) %>%
-  dplyr::summarize(Total_Avg = mean(Med_Value, na.rm = TRUE))
-
-# 4. Build the faceted plot
-dashboard_plot_c3 <- ggplot(cluster3_long, aes(x = Run_ID, y = Med_Value)) +
-  geom_line(color = "#75460E", alpha = 0.7) + # Using your Rocky Core gold
-  geom_point(color = "#75460E", size = 1.5) +
-  geom_hline(data = averages_data_c3, aes(yintercept = Total_Avg), 
-             color = "red", linetype = "dotted", size = 1) +
-  facet_wrap(~ Variable, scales = "free_y", ncol = 2) + 
   labs(
-    title = "Cluster 3 (Eccentric Giants) Stability Across 100 Runs",
+    title = "Sub-Communities per Parent Cluster",
     x = "Run ID",
-    y = "Median Value"
-  ) +
-  theme_bw() + 
-  theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    strip.background = element_rect(fill = "gray90"),
-    strip.text = element_text(face = "bold")
+    y = "Number of Sub-Communities"
   )
-
-# 5. Display the plot
-print(dashboard_plot_c3)
 ```
 
-# Master Summary Table
-```{r}
-master_summary_table <- MC_Master_Data %>%
-  dplyr::group_by(True_Cluster) %>%
+# Master Sub-Cluster Summary Table
+```{r SubCluster Summary}
+# Filter summary to only include runs matching the modal sub-cluster count
+subcluster_summary_table <- MC_Master_Data %>%
+  dplyr::group_by(True_Main, Run_ID) %>%
+  dplyr::filter(
+    (True_Main == 1 & dplyr::n_distinct(Sub_Cluster_Raw) == 3) |
+    (True_Main == 2 & dplyr::n_distinct(Sub_Cluster_Raw) == 3) |
+    (True_Main == 3 & dplyr::n_distinct(Sub_Cluster_Raw) == 3)
+  ) %>%
+  dplyr::group_by(True_Main, Sub_Cluster_Raw) %>%
   dplyr::summarize(
     Avg_Count      = round(mean(Count, na.rm = TRUE), 0),
     Avg_Med_Mass   = round(mean(Med_Mass, na.rm = TRUE), 4),
@@ -362,6 +243,45 @@ master_summary_table <- MC_Master_Data %>%
     .groups = "drop"
   )
 
-# Display the master summary table
-print(master_summary_table)
+print(subcluster_summary_table)
+```
+
+### Boxplot
+```{r}
+# 1. Filter for k=3 topology & reshape data into long format
+all_params_long <- MC_Master_Data %>%
+  dplyr::group_by(True_Main, Run_ID) %>%
+  dplyr::filter(dplyr::n_distinct(Sub_Cluster_Raw) == 3) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_longer(
+    cols = c(Mean_Mass, Mean_Radius, Mean_Period, Mean_Eccen, Mean_Insol, Mean_Dens),
+    names_to = "Feature",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+    # Clean up labels and fix facet ordering
+    Feature = factor(Feature, 
+      levels = c("Mean_Mass", "Mean_Radius", "Mean_Period", "Mean_Eccen", "Mean_Insol", "Mean_Dens"),
+      labels = c("Mass (M_Jup)", "Radius (R_Jup)", "Period (days)", 
+                 "Eccentricity", "Insolation", "Density (g/cm³)")
+    )
+  )
+
+# 2. Multi-panel boxplot grid
+ggplot(all_params_long, aes(x = factor(Sub_Cluster_Raw), y = Value, fill = factor(True_Main))) +
+  geom_boxplot(outlier.alpha = 0.3, outlier.size = 1) +
+  facet_wrap(~ Feature, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Sub-Cluster Stability Across All Physical Parameters",
+    x = "Sub-Cluster ID",
+    y = "Parameter Value",
+    fill = "Main Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
 ```
